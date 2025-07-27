@@ -10,7 +10,9 @@ import pandas as pd
 import torch
 
 
-def save_jsonl(data: pd.DataFrame | Iterable[dict] | dict[Any, Iterable], path: Path | str) -> None:
+def save_jsonl(
+    data: pd.DataFrame | Iterable[dict] | dict[Any, Iterable], path: Path | str
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -72,7 +74,9 @@ def save_config(data, path: Path | str) -> None:
         data: dict = vars(data)
 
     data = {k: v for k, v in data.items() if not ismethod(v)}
-    data = {k: v if type(v) in [int, float, bool, None] else str(v) for k, v in data.items()}
+    data = {
+        k: v if type(v) in [int, float, bool, None] else str(v) for k, v in data.items()
+    }
 
     save_json(data, path)
 

@@ -36,7 +36,9 @@ class Args(Tap):
     seed: int = 42
 
     def process_args(self):
-        self.label2id: dict[str, int] = utils.load_json(self.dataset_dir / "label2id.json")
+        self.label2id: dict[str, int] = utils.load_json(
+            self.dataset_dir / "label2id.json"
+        )
         self.labels: list[int] = list(self.label2id.values())
 
         date, time = datetime.now().strftime("%Y-%m-%d/%H-%M-%S.%f").split("/")
@@ -58,7 +60,7 @@ class Experiment:
     def __init__(self, args: Args):
         self.args: Args = args
 
-        use_fast = not ("japanese-gpt-neox" in args.model_name)
+        use_fast = "japanese-gpt-neox" not in args.model_name
         self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
             args.model_name,
             model_max_length=args.max_seq_len,
@@ -148,13 +150,17 @@ class Experiment:
         optimizer_grouped_parameters = [
             {
                 "params": [
-                    param for name, param in self.model.named_parameters() if not name in no_decay
+                    param
+                    for name, param in self.model.named_parameters()
+                    if name not in no_decay
                 ],
                 "weight_decay": self.args.weight_decay,
             },
             {
                 "params": [
-                    param for name, param in self.model.named_parameters() if name in no_decay
+                    param
+                    for name, param in self.model.named_parameters()
+                    if name in no_decay
                 ],
                 "weight_decay": 0.0,
             },
@@ -171,9 +177,10 @@ class Experiment:
         return optimizer, lr_scheduler
 
     def run(self):
-        val_metrics = {"epoch": None,
-            "elapsed":0.0,
-            **self.evaluate(self.val_dataloader)
+        val_metrics = {
+            "epoch": None,
+            "elapsed": 0.0,
+            **self.evaluate(self.val_dataloader),
         }
 
         best_epoch, best_val_f1 = None, val_metrics["f1"]
@@ -229,7 +236,9 @@ class Experiment:
 
         ts_start = time.perf_counter()
 
-        for batch in tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, leave=False):
+        for batch in tqdm(
+            dataloader, total=len(dataloader), dynamic_ncols=True, leave=False
+        ):
             if "token_type_ids" in batch:
                 batch.pop("token_type_ids")
 
