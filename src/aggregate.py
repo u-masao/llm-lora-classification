@@ -62,7 +62,7 @@ def main(args: Args):
     print("-" * 80)
     for row in best_model_df.to_dict("records"):
         print(
-            f'|[{row["model_name"]}](https://huggingface.co/{row["model_name"]})|{row["accuracy"]*100:.2f}|{row["precision"]*100:.2f}|{row["recall"]*100:.2f}|{row["f1"]*100:.2f}|'
+            f"|[{row['model_name']}](https://huggingface.co/{row['model_name']})|{row['accuracy'] * 100:.2f}|{row['precision'] * 100:.2f}|{row['recall'] * 100:.2f}|{row['f1'] * 100:.2f}|"
         )
 
     best_template_df = (
@@ -75,7 +75,7 @@ def main(args: Args):
     print("-" * 80)
     for row in best_template_df.to_dict("records"):
         print(
-            f'|[{row["model_name"]}](https://huggingface.co/{row["model_name"]})|{row["template_type"]}|{row["best-val-f1"]*100:.2f}|{row["f1"]*100:.2f}|'
+            f"|[{row['model_name']}](https://huggingface.co/{row['model_name']})|{row['template_type']}|{row['best-val-f1'] * 100:.2f}|{row['f1'] * 100:.2f}|"
         )
 
     best_lr_df = df[
@@ -88,7 +88,7 @@ def main(args: Args):
     print("-" * 80)
     for row in best_lr_df.to_dict("records"):
         print(
-            f'|{row["lr"]:e}|{row["best-val-f1"]*100:.2f}|{row["accuracy"]*100:.2f}|{row["precision"]*100:.2f}|{row["recall"]*100:.2f}|{row["f1"]*100:.2f}|'
+            f"|{row['lr']:e}|{row['best-val-f1'] * 100:.2f}|{row['accuracy'] * 100:.2f}|{row['precision'] * 100:.2f}|{row['recall'] * 100:.2f}|{row['f1'] * 100:.2f}|"
         )
 
     best_r_df = (
@@ -105,12 +105,12 @@ def main(args: Args):
     print("-" * 80)
     for row in best_r_df.to_dict("records"):
         print(
-            f'|{row["lora_r"]}|{row["lr"]:e}|{row["best-val-f1"]*100:.2f}|{row["accuracy"]*100:.2f}|{row["precision"]*100:.2f}|{row["recall"]*100:.2f}|{row["f1"]*100:.2f}|'
+            f"|{row['lora_r']}|{row['lr']:e}|{row['best-val-f1'] * 100:.2f}|{row['accuracy'] * 100:.2f}|{row['precision'] * 100:.2f}|{row['recall'] * 100:.2f}|{row['f1'] * 100:.2f}|"
         )
 
     best_batch_size_df = (
         df[
-            ((df["lora_r"] == 32))
+            (df["lora_r"] == 32)
             & (df["model_name"] == "rinna/japanese-gpt-neox-3.6b")
             & (df["template_type"] == 2)
         ]
@@ -122,7 +122,7 @@ def main(args: Args):
     print("-" * 80)
     for row in best_batch_size_df.to_dict("records"):
         print(
-            f'|{row["batch_size"]}|{row["lr"]:e}|{row["best-val-f1"]*100:.2f}|{row["accuracy"]*100:.2f}|{row["precision"]*100:.2f}|{row["recall"]*100:.2f}|{row["f1"]*100:.2f}|'
+            f"|{row['batch_size']}|{row['lr']:e}|{row['best-val-f1'] * 100:.2f}|{row['accuracy'] * 100:.2f}|{row['precision'] * 100:.2f}|{row['recall'] * 100:.2f}|{row['f1'] * 100:.2f}|"
         )
 
 

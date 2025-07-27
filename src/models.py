@@ -59,7 +59,7 @@ class Model(nn.Module):
             ),
             seq_length - 1,
         ]
-        logits: FloatTensor = self.classifier(eos_hidden_states)
+        logits: FloatTensor = self.classifier(eos_hidden_states.to(torch.float32))
         loss: FloatTensor = self.loss_fn(logits, labels)
 
         return SequenceClassifierOutput(
