@@ -1,6 +1,6 @@
+import time
 from datetime import datetime
 from pathlib import Path
-import time
 
 import torch
 from accelerate import Accelerator
@@ -11,7 +11,7 @@ from tqdm import tqdm, trange
 from transformers import AutoTokenizer, BatchEncoding, PreTrainedModel
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.optimization import get_linear_schedule_with_warmup
-from transformers.tokenization_utils import BatchEncoding, PreTrainedTokenizer
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 import src.utils as utils
 from src.models import Model
