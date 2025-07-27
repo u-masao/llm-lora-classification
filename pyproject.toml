@@ -16,39 +16,24 @@ dependencies = [
     "transformers>=4.54.0",
     "typed-argument-parser>=1.10.1",
     "unsloth>=2025.7.8",
+    "huggingface-hub[cli]>=0.34.1",
 ]
 
-
-# 開発用の依存関係を追加
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
     "ruff",
 ]
 
-# ruff の設定を追加
 [tool.ruff]
-# black と同じ行長に設定
 line-length = 88
-# 最低限の Python バージョンを指定
 target-version = "py312"
 
 [tool.ruff.lint]
-# 有効にするルールセット
-# E: pycodestyle errors
-# W: pycodestyle warnings
-# F: Pyflakes
-# I: isort
-# UP: pyupgrade
-# C90: McCabe complexity
 select = ["E", "W", "F", "I", "UP", "C90"]
 ignore = []
 
 [tool.ruff.format]
-# ダブルクォートを強制
 quote-style = "double"
-# インデントスタイル
 indent-style = "space"
-# マジックトレーリングコンマをスキップしない (有効にする)
 skip-magic-trailing-comma = false
-# 改行コード
 line-ending = "lf"
