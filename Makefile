@@ -13,8 +13,8 @@ PYTHON_INTERPRETER = uv run python
 .PHONY: lint
 LINT_TARGET=src
 lint:
-	uv run ruff check --fix $(LINT_TARGET)
 	uv run ruff format $(LINT_TARGET)
+	uv run ruff check --fix $(LINT_TARGET)
 
 
 ## setup
@@ -36,13 +36,19 @@ data/text/README.txt:
 	bash src/download.sh
 
 datasets/livedoor/all.jsonl: data/text/README.txt
-	uv run python src/prepare.py
+	@$(PYTHON_INTERPRETER) src/prepare.py
 
 
 ## login huggingface
 .PHONY: login_huggingface
 login_huggingface:
 	uv run hf auth login
+
+
+## run mlflow ui
+.PHONY: mlflow_ui
+mlflow_ui:
+	uv run mlflow ui -h 0.0.0.0
 
 
 #################################################################################
