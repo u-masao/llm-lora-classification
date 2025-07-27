@@ -168,3 +168,6 @@ cython_debug/
 
 # mlflow cache
 /mlruns
+
+# nohup.out
+/nohup.out
