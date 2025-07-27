@@ -2,6 +2,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import mlflow
+import numpy as np
 import torch
 from accelerate import Accelerator
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
@@ -42,14 +44,14 @@ class Args(Tap):
         self.labels: list[int] = list(self.label2id.values())
 
         date, time = datetime.now().strftime("%Y-%m-%d/%H-%M-%S.%f").split("/")
-        self.output_dir = self.make_output_dir(
+        self.output_dir = self._make_output_dir(
             "outputs",
             self.model_name,
             date,
             time,
         )
 
-    def make_output_dir(self, *args) -> Path:
+    def _make_output_dir(self, *args) -> Path:
         args = [str(a).replace("/", "__") for a in args]
         output_dir = Path(*args)
         output_dir.mkdir(parents=True)
@@ -78,7 +80,7 @@ class Experiment:
         self.train_dataloader = self.load_dataset(split="train", shuffle=True)
         steps_per_epoch: int = len(self.train_dataloader)
 
-        self.accelerator = Accelerator()
+        self.accelerator = Accelerator(log_with="mlflow")
         (
             self.model,
             self.train_dataloader,
@@ -177,20 +179,26 @@ class Experiment:
         return optimizer, lr_scheduler
 
     def run(self):
-        val_metrics = {
-            "epoch": None,
-            "elapsed": 0.0,
-            **self.evaluate(self.val_dataloader),
+        # setup log
+        mlflow.set_experiment("train")
+        mlflow.system_metrics.enable_system_metrics_logging()
+        mlflow.start_run()
+        mlflow.log_params(self.args.as_dict())
+
+        metrics = {
+            "epoch": -1,
+            "train.loss": np.inf,
+            **{f"valid.{k}": v for k, v in self.evaluate(self.val_dataloader).items()},
         }
 
-        best_epoch, best_val_f1 = None, val_metrics["f1"]
-        best_state_dict = self.model.clone_state_dict()
-        self.log(val_metrics)
+        best_epoch, best_val_f1 = None, metrics["valid.f1"]
+        self.log(metrics)
 
         for epoch in trange(self.args.epochs, dynamic_ncols=True):
             self.model.train()
 
             ts_start = time.perf_counter()
+            total_loss = 0
 
             for batch in tqdm(
                 self.train_dataloader,
@@ -203,29 +211,49 @@ class Experiment:
                     batch.pop("token_type_ids")
                 out: SequenceClassifierOutput = self.model(**batch)
                 loss: torch.FloatTensor = out.loss
+
+                batch_size: int = batch.input_ids.size(0)
+                total_loss += loss.item() * batch_size
+
                 self.accelerator.backward(loss)
 
                 self.optimizer.step()
                 self.lr_scheduler.step()
 
-            self.model.eval()
-            val_metrics = {
-                "epoch": epoch,
-                "elapsed": time.perf_counter() - ts_start,
-                **self.evaluate(self.val_dataloader),
-            }
-            self.log(val_metrics)
+            train_elapsed_time = time.perf_counter() - ts_start
 
-            if val_metrics["f1"] > best_val_f1:
-                best_val_f1 = val_metrics["f1"]
+            self.model.eval()
+
+            metrics = {
+                "epoch": epoch,
+                "train.loss": total_loss / len(self.train_dataloader.dataset),
+                "train.elapsed_time": train_elapsed_time,
+                **{
+                    f"valid.{k}": v
+                    for k, v in self.evaluate(self.val_dataloader).items()
+                },
+            }
+            self.log(metrics)
+
+            if metrics["valid.f1"] > best_val_f1:
+                best_val_f1 = metrics["valid.f1"]
                 best_epoch = epoch
                 best_state_dict = self.model.clone_state_dict()
 
         self.model.load_state_dict(best_state_dict)
         self.model.eval()
 
-        val_metrics = {"best-epoch": best_epoch, **self.evaluate(self.val_dataloader)}
-        test_metrics = self.evaluate(self.test_dataloader)
+        val_metrics = {
+            "best-epoch": best_epoch,
+            **{f"valid.{k}": v for k, v in self.evaluate(self.val_dataloader).items()},
+        }
+        test_metrics = {
+            f"test.{k}": v for k, v in self.evaluate(self.test_dataloader).items()
+        }
+
+        mlflow.log_params(val_metrics)
+        mlflow.log_params(test_metrics)
+        mlflow.end_run()
 
         return val_metrics, test_metrics
 
@@ -261,25 +289,26 @@ class Experiment:
         )
 
         return {
-            "loss": loss / len(dataloader.dataset),
+            "loss": total_loss / len(dataloader.dataset),
             "accuracy": accuracy,
             "precision": precision,
             "recall": recall,
             "f1": f1,
-            "elapsed": ts_start - time.perf_counter(),
+            "elapsed_time": time.perf_counter() - ts_start,
         }
 
     def log(self, metrics: dict) -> None:
         utils.log(metrics, self.args.output_dir / "log.csv")
         tqdm.write(
-            f"epoch: {metrics['epoch']} \t"
-            f"loss: {metrics['loss']:2.6f}   \t"
-            f"accuracy: {metrics['accuracy']:.4f} \t"
-            f"precision: {metrics['precision']:.4f} \t"
-            f"recall: {metrics['recall']:.4f} \t"
-            f"f1: {metrics['f1']:.4f}"
-            f"elapsed: {metrics['elapsed']:.0f}"
+            f"epoch: {metrics['epoch']}, "
+            f"train.loss: {metrics['train.loss']:2.6f}, "
+            f"valid.loss: {metrics['valid.loss']:2.6f}, "
+            f"accuracy: {metrics['valid.accuracy']:.4f}, "
+            f"precision: {metrics['valid.precision']:.4f}, "
+            f"recall: {metrics['valid.recall']:.4f}, "
+            f"f1: {metrics['valid.f1']:.4f}, "
         )
+        mlflow.log_metrics(metrics, step=metrics["epoch"])
 
 
 def main(args: Args):
