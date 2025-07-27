@@ -16,7 +16,7 @@ def save_jsonl(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if type(data) != pd.DataFrame:
+    if not isinstance(data, pd.DataFrame):
         data = pd.DataFrame(data)
     data.to_json(
         path,
@@ -64,13 +64,13 @@ def save_config(data, path: Path | str) -> None:
 
     try:
         data: dict = data.as_dict()
-    except:
+    except Exception:
         try:
             data: dict = data.to_dict()
-        except:
+        except Exception:
             pass
 
-    if type(data) != dict:
+    if not isinstance(data, dict):
         data: dict = vars(data)
 
     data = {k: v for k, v in data.items() if not ismethod(v)}
@@ -98,7 +98,7 @@ def dict_average(dicts: Iterable[dict]) -> dict:
     for k, v in dicts[0].items():
         try:
             v = v.item()
-        except:
+        except Exception:
             pass
         if type(v) in [int, float]:
             averaged[k] = v / len(dicts)
@@ -109,7 +109,7 @@ def dict_average(dicts: Iterable[dict]) -> dict:
         for k, v in d.items():
             try:
                 v = v.item()
-            except:
+            except Exception:
                 pass
             if type(v) in [int, float]:
                 averaged[k] += v / len(dicts)
