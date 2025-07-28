@@ -48,7 +48,7 @@ login_huggingface:
 ## run mlflow ui
 .PHONY: mlflow_ui
 mlflow_ui:
-	uv run mlflow ui -h 0.0.0.0
+	uv run mlflow ui -h 0.0.0.0 --backend-store-uri sqlite:///mlflow.db
 
 
 #################################################################################
