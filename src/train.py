@@ -105,7 +105,7 @@ class Experiment:
         mlflow.log_metrics(
             {
                 "train.docs": len(self.train_dataloader.dataset),
-                "valid.docs": len(self.valid_dataloader.dataset),
+                "valid.docs": len(self.val_dataloader.dataset),
                 "test.docs": len(self.test_dataloader.dataset),
             }
         )
@@ -195,12 +195,6 @@ class Experiment:
         return optimizer, lr_scheduler
 
     def run(self):
-        # setup log
-        mlflow.set_experiment("train")
-        mlflow.system_metrics.enable_system_metrics_logging()
-        mlflow.start_run()
-        mlflow.log_params(self.args.as_dict())
-
         metrics = {
             "epoch": -1,
             "train.loss": np.inf,
@@ -286,10 +280,6 @@ class Experiment:
             f"best.test.{k}": v for k, v in self.evaluate(self.test_dataloader).items()
         }
 
-        mlflow.log_metrics(val_metrics)
-        mlflow.log_metrics(test_metrics)
-        mlflow.end_run()
-
         return val_metrics, test_metrics
 
     @torch.inference_mode()
@@ -364,12 +354,22 @@ class Experiment:
 
 
 def main(args: Args):
+    # setup log
+    mlflow.set_tracking_uri("sqlite:///mlflow.db")
+    mlflow.set_experiment("train")
+    mlflow.system_metrics.enable_system_metrics_logging()
+    mlflow.start_run()
+    mlflow.log_params(args.as_dict())
+
     exp = Experiment(args=args)
     val_metrics, test_metrics = exp.run()
 
     utils.save_json(val_metrics, args.output_dir / "val-metrics.json")
     utils.save_json(test_metrics, args.output_dir / "test-metrics.json")
     utils.save_config(args, args.output_dir / "config.json")
+    mlflow.log_metrics(val_metrics)
+    mlflow.log_metrics(test_metrics)
+    mlflow.end_run()
 
 
 if __name__ == "__main__":
