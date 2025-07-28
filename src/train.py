@@ -102,6 +102,14 @@ class Experiment:
             *self.create_optimizer(steps_per_epoch),
         )
 
+        mlflow.log_metrics(
+            {
+                "train.docs": len(self.train_dataloader.dataset),
+                "valid.docs": len(self.valid_dataloader.dataset),
+                "test.docs": len(self.test_dataloader.dataset),
+            }
+        )
+
     def load_dataset(
         self,
         split: str,
@@ -123,6 +131,7 @@ class Experiment:
         title = [d["title"] for d in data_list]
         body = [d["body"] for d in data_list]
         text = [self.build_input(t, b) for t, b in zip(title, body)]
+        text_length = [len(t) for t in text]
 
         inputs: BatchEncoding = self.tokenizer(
             text,
@@ -133,7 +142,8 @@ class Experiment:
         )
 
         labels = torch.LongTensor([d["label"] for d in data_list])
-        return BatchEncoding({**inputs, "labels": labels})
+        text_length = torch.IntTensor([len(t) for t in text])
+        return BatchEncoding({**inputs, "labels": labels, "text_length": text_length})
 
     def create_loader(
         self,
@@ -204,7 +214,7 @@ class Experiment:
             self.model.train()
 
             ts_start = time.perf_counter()
-            total_loss = 0
+            total_loss, total_token, total_text_length = 0, 0, 0
 
             for batch in tqdm(
                 self.train_dataloader,
@@ -212,9 +222,16 @@ class Experiment:
                 dynamic_ncols=True,
                 leave=False,
             ):
+                text_length = batch["text_length"].tolist()
+                total_text_length += sum(text_length)
+                batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
+                total_token += sum(batch_tokens)
+
+                for query in ["token_type_ids", "text_length"]:
+                    if query in batch:
+                        batch.pop(query)
+
                 self.optimizer.zero_grad()
-                if "token_type_ids" in batch:
-                    batch.pop("token_type_ids")
                 out: SequenceClassifierOutput = self.model(**batch)
                 loss: torch.FloatTensor = out.loss
 
@@ -230,10 +247,19 @@ class Experiment:
 
             self.model.eval()
 
+            dataset_length = len(self.train_dataloader.dataset)
+
             metrics = {
                 "epoch": epoch,
-                "train.loss": total_loss / len(self.train_dataloader.dataset),
+                "train.loss": total_loss / dataset_length,
                 "train.elapsed_time": train_elapsed_time,
+                "train.tokens": total_token,
+                "train.avg_tokens_par_sec": total_token / train_elapsed_time,
+                "train.avg_data_par_sec": dataset_length / train_elapsed_time,
+                "train.avg_tokens_par_doc": total_token / dataset_length,
+                "train.text_length": total_text_length,
+                "train.avg_text_length": total_text_length / dataset_length,
+                "train.avg_text_length_par_token": total_text_length / total_token,
                 **{
                     f"valid.{k}": v
                     for k, v in self.evaluate(self.val_dataloader).items()
@@ -250,15 +276,18 @@ class Experiment:
         self.model.eval()
 
         val_metrics = {
-            "best-epoch": best_epoch,
-            **{f"valid.{k}": v for k, v in self.evaluate(self.val_dataloader).items()},
+            "best.epoch": best_epoch,
+            **{
+                f"best.valid.{k}": v
+                for k, v in self.evaluate(self.val_dataloader).items()
+            },
         }
         test_metrics = {
-            f"test.{k}": v for k, v in self.evaluate(self.test_dataloader).items()
+            f"best.test.{k}": v for k, v in self.evaluate(self.test_dataloader).items()
         }
 
-        mlflow.log_params(val_metrics)
-        mlflow.log_params(test_metrics)
+        mlflow.log_metrics(val_metrics)
+        mlflow.log_metrics(test_metrics)
         mlflow.end_run()
 
         return val_metrics, test_metrics
@@ -266,15 +295,22 @@ class Experiment:
     @torch.inference_mode()
     def evaluate(self, dataloader: DataLoader) -> dict[str, float]:
         self.model.eval()
-        total_loss, gold_labels, pred_labels = 0, [], []
+        total_loss, total_token, gold_labels, pred_labels = 0, 0, [], []
+        total_text_length = 0
 
         ts_start = time.perf_counter()
 
         for batch in tqdm(
             dataloader, total=len(dataloader), dynamic_ncols=True, leave=False
         ):
-            if "token_type_ids" in batch:
-                batch.pop("token_type_ids")
+            text_length = batch["text_length"].tolist()
+            total_text_length += sum(text_length)
+            batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
+            total_token += sum(batch_tokens)
+
+            for query in ["token_type_ids", "text_length"]:
+                if query in batch:
+                    batch.pop(query)
 
             out: SequenceClassifierOutput = self.model(**batch)
 
@@ -285,6 +321,8 @@ class Experiment:
             gold_labels += batch.labels.tolist()
             total_loss += loss
 
+        elapsed_time = time.perf_counter() - ts_start
+
         accuracy: float = accuracy_score(gold_labels, pred_labels)
         precision, recall, f1, _ = precision_recall_fscore_support(
             gold_labels,
@@ -293,14 +331,22 @@ class Experiment:
             zero_division=0,
             labels=args.labels,
         )
+        dataset_length = len(dataloader.dataset)
 
         return {
-            "loss": total_loss / len(dataloader.dataset),
+            "loss": total_loss / dataset_length,
             "accuracy": accuracy,
             "precision": precision,
             "recall": recall,
             "f1": f1,
-            "elapsed_time": time.perf_counter() - ts_start,
+            "elapsed_time": elapsed_time,
+            "tokens": total_token,
+            "avg_tokens_par_sec": total_token / elapsed_time,
+            "avg_data_par_sec": dataset_length / elapsed_time,
+            "avg_tokens_par_doc": total_token / dataset_length,
+            "text_length": total_text_length,
+            "avg_text_length": total_text_length / dataset_length,
+            "avg_text_length_par_token": total_text_length / total_token,
         }
 
     def log(self, metrics: dict) -> None:
