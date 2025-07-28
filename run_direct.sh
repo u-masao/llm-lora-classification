@@ -2,9 +2,14 @@
 
 set -x
 
+CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 128 --use_unsloth
+CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 128
+
+exit
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 512
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4096
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-440m --max_seq_len 4096
+exit
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-980m --max_seq_len 4096
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name Qwen/Qwen3-0.6B --max_seq_len 4096
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name Qwen/Qwen3-1.7B
