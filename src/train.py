@@ -1,3 +1,5 @@
+import unsloth  # noqa: I001 F401
+
 import time
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +28,8 @@ class Args(Tap):
     batch_size: int = 32
     epochs: int = 10
     num_warmup_epochs: int = 1
+
+    use_unsloth: bool = False
 
     template_type: int = 2
 
@@ -73,6 +77,8 @@ class Experiment:
             model_name=args.model_name,
             num_labels=len(args.labels),
             lora_r=args.lora_r,
+            max_seq_len=args.max_seq_len,
+            use_unsloth=args.use_unsloth,
             gradient_checkpointing=args.gradient_checkpointing,
         ).eval()
         self.model.write_trainable_params()
