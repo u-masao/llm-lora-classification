@@ -102,17 +102,18 @@ class Model(nn.Module):
         attention_mask: LongTensor = None,
         labels: LongTensor = None,
     ) -> SequenceClassifierOutput:
+        if self.use_unsloth:
+            model = self.backbone.model.model
+        else:
+            model = self.backbone.model
+
         # take peft backbone output
-        outputs: BaseModelOutputWithPast = self.backbone(
+        outputs: BaseModelOutputWithPast = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=self.use_unsloth,
         )
 
-        if self.use_unsloth:
-            last_hidden_state = outputs.hidden_states[-1]
-        else:
-            last_hidden_state = outputs.last_hidden_state
+        last_hidden_state = outputs.last_hidden_state
 
         seq_length: LongTensor = attention_mask.sum(dim=1)
         eos_hidden_states: FloatTensor = last_hidden_state[
@@ -123,7 +124,10 @@ class Model(nn.Module):
             seq_length - 1,
         ]
         logits: FloatTensor = self.classifier(eos_hidden_states.to(torch.float32))
-        loss: FloatTensor = self.loss_fn(logits, labels)
+
+        loss = None
+        if labels is not None:
+            loss: FloatTensor = self.loss_fn(logits, labels)
 
         return SequenceClassifierOutput(
             loss=loss,
