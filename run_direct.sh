@@ -2,11 +2,23 @@
 
 set -x
 
-CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 128 --use_unsloth
-CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 512 --use_unsloth
-CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 1024 --use_unsloth
-CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4096 --use_unsloth
-CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 8192 --use_unsloth
+CUDA_VISIBLE_DEVICES=0
+
+
+
+SEQ_LENGTHS=(512 1024 2048 3072 4096 6144 8192)
+MODEL=llm-jp/llm-jp-3-150m
+
+for SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
+    CMD="uv run python src/train.py --model_name $MODEL --max_seq_len $SEQ_LENGTH"
+    $CMD
+    $CMD --use_unsloth
+done
+
+exit
+
+CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 2048
+CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4096
 CUDA_VISIBLE_DEVICES=0 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 8192
 exit
 
