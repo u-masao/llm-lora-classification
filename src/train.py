@@ -138,7 +138,7 @@ class Experiment:
             truncation=True,
             padding=True,
             return_tensors="pt",
-            max_length=args.max_seq_len,
+            max_length=self.args.max_seq_len,
         )
 
         labels = torch.LongTensor([d["label"] for d in data_list])
@@ -319,7 +319,7 @@ class Experiment:
             pred_labels,
             average="macro",
             zero_division=0,
-            labels=args.labels,
+            labels=self.args.labels,
         )
         dataset_length = len(dataloader.dataset)
 
@@ -373,6 +373,6 @@ def main(args: Args):
 
 
 if __name__ == "__main__":
-    args = Args().parse_args()
-    utils.init(seed=args.seed)
-    main(args)
+    cli_args = Args().parse_args()
+    utils.init(seed=cli_args.seed)
+    main(cli_args)
