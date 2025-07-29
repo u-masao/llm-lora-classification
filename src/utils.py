@@ -97,24 +97,24 @@ def dict_average(dicts: Iterable[dict]) -> dict:
 
     for k, v in dicts[0].items():
         try:
-            v = v.item()
+            _v = v.item()
         except Exception:
             pass
-        if type(v) in [int, float]:
-            averaged[k] = v / len(dicts)
+        if type(_v) in [int, float]:
+            averaged[k] = _v / len(dicts)
         else:
-            averaged[k] = [v]
+            averaged[k] = [_v]
 
     for d in dicts[1:]:
         for k, v in d.items():
             try:
-                v = v.item()
+                _v = v.item()
             except Exception:
                 pass
-            if type(v) in [int, float]:
-                averaged[k] += v / len(dicts)
+            if type(_v) in [int, float]:
+                averaged[k] += _v / len(dicts)
             else:
-                averaged[k].append(v)
+                averaged[k].append(_v)
 
     return averaged
 
