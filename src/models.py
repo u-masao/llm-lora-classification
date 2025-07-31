@@ -1,6 +1,7 @@
 import unsloth  # noqa: I001 F401
 from unsloth import FastLanguageModel  # noqa: I001
 
+import mlflow
 import peft
 import torch
 import torch.nn as nn
@@ -67,8 +68,7 @@ class Model(nn.Module):
             verbose=0,
         )
         print(model_summary)
-        print(self.classifier)
-        print(self.loss_fn)
+        mlflow.log_text(model_summary, "model_summary.txt")
 
     def _init_model_by_unsloth(
         self,
