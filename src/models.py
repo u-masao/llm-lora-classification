@@ -67,8 +67,13 @@ class Model(nn.Module):
             col_width=15,
             verbose=0,
         )
-        print(model_summary)
         mlflow.log_text(str(model_summary), "model_summary.txt")
+        mlflow.log_metrics(
+            {
+                "model.total_params": model_summary.total_params,
+                "model.trainable_params": model_summary.trainable_params,
+            }
+        )
 
     def _init_model_by_unsloth(
         self,
