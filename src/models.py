@@ -68,7 +68,7 @@ class Model(nn.Module):
             verbose=0,
         )
         print(model_summary)
-        mlflow.log_text(model_summary, "model_summary.txt")
+        mlflow.log_text(str(model_summary), "model_summary.txt")
 
     def _init_model_by_unsloth(
         self,
