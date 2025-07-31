@@ -5,6 +5,15 @@ set -x
 CUDA_VISIBLE_DEVICES=0
 
 
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10 --use_unsloth --use_output_hidden_states
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10 --use_unsloth
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10 --use_output_hidden_states
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4000 --epochs 10 --use_unsloth --use_output_hidden_states
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4000 --epochs 10 --use_unsloth
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4000 --epochs 10 --use_output_hidden_states
+uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 4000 --epochs 10
+exit
 
 SEQ_LENGTHS=(512 1024 2048 3072 4096 6144 8192)
 MODEL=llm-jp/llm-jp-3-150m
