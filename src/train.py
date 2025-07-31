@@ -1,5 +1,3 @@
-import unsloth  # noqa: I001 F401
-
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,9 +27,8 @@ class Args(Tap):
     epochs: int = 10
     num_warmup_epochs: int = 1
 
-    use_unsloth: bool = False
-    use_output_hidden_states: bool = False
     model_print_depth: int = 4
+    gradient_accumulation_steps: int = 4
 
     template_type: int = 2
 
@@ -80,8 +77,6 @@ class Experiment:
             num_labels=len(args.labels),
             lora_r=args.lora_r,
             max_seq_len=args.max_seq_len,
-            use_unsloth=args.use_unsloth,
-            use_output_hidden_states=args.use_output_hidden_states,
             model_print_depth=args.model_print_depth,
             gradient_checkpointing=args.gradient_checkpointing,
         ).eval()
@@ -90,7 +85,10 @@ class Experiment:
         self.train_dataloader = self.load_dataset(split="train", shuffle=True)
         steps_per_epoch: int = len(self.train_dataloader)
 
-        self.accelerator = Accelerator(log_with="mlflow")
+        self.accelerator = Accelerator(
+            log_with="mlflow",
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+        )
         (
             self.model,
             self.train_dataloader,
@@ -220,26 +218,27 @@ class Experiment:
                 dynamic_ncols=True,
                 leave=False,
             ):
-                text_length = batch["text_length"].tolist()
-                total_text_length += sum(text_length)
-                batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
-                total_token += sum(batch_tokens)
+                with self.accelerator.accumulate(self.model):
+                    text_length = batch["text_length"].tolist()
+                    total_text_length += sum(text_length)
+                    batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
+                    total_token += sum(batch_tokens)
 
-                for query in ["token_type_ids", "text_length"]:
-                    if query in batch:
-                        batch.pop(query)
+                    for query in ["token_type_ids", "text_length"]:
+                        if query in batch:
+                            batch.pop(query)
 
-                self.optimizer.zero_grad()
-                out: SequenceClassifierOutput = self.model(**batch)
-                loss: torch.FloatTensor = out.loss
+                    self.optimizer.zero_grad()
+                    out: SequenceClassifierOutput = self.model(**batch)
+                    loss: torch.FloatTensor = out.loss
 
-                batch_size: int = batch.input_ids.size(0)
-                total_loss += loss.item() * batch_size
+                    batch_size: int = batch.input_ids.size(0)
+                    total_loss += loss.item() * batch_size
 
-                self.accelerator.backward(loss)
+                    self.accelerator.backward(loss)
 
-                self.optimizer.step()
-                self.lr_scheduler.step()
+                    self.optimizer.step()
+                    self.lr_scheduler.step()
 
             train_elapsed_time = time.perf_counter() - ts_start
 
