@@ -229,7 +229,7 @@ class Experiment:
         return result
 
     def run(self):
-        mlflow.log_params(self.calc_token_length())
+        mlflow.log_metrics(self.calc_token_length())
 
         metrics = {
             "epoch": -1,
