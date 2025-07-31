@@ -4,6 +4,7 @@ from unsloth import FastLanguageModel  # noqa: I001
 import peft
 import torch
 import torch.nn as nn
+import torchinfo
 from peft import LoraConfig, PeftModel
 from torch import FloatTensor, LongTensor
 from transformers import AutoModel, PreTrainedModel
@@ -22,10 +23,13 @@ class Model(nn.Module):
         max_seq_len: int = 128,
         gradient_checkpointing: bool = True,
         use_unsloth: bool = False,
+        use_output_hidden_states: bool = False,
+        model_print_depth: int = 4,
     ):
         super().__init__()
 
         self.use_unsloth = use_unsloth
+        self.use_output_hidden_states = use_output_hidden_states
 
         if use_unsloth:
             self._init_model_by_unsloth(
@@ -34,6 +38,7 @@ class Model(nn.Module):
                 max_seq_len=max_seq_len,
                 gradient_checkpointing=gradient_checkpointing,
             )
+            model_print_depth += 1
         else:
             self._init_model_by_transformers(
                 model_name=model_name,
@@ -46,6 +51,25 @@ class Model(nn.Module):
         self.classifier = nn.Linear(hidden_size, num_labels, bias=False)
         self.loss_fn = nn.CrossEntropyLoss()
 
+        # print model summary
+        batch_size = 1
+        model_summary = torchinfo.summary(
+            self.backbone,
+            depth=model_print_depth,
+            input_size=[
+                (batch_size, max_seq_len),
+                (batch_size, max_seq_len),
+                (batch_size, max_seq_len),
+            ],
+            dtypes=[torch.long, torch.long, torch.long],
+            col_names=["input_size", "output_size", "num_params", "trainable"],
+            col_width=15,
+            verbose=0,
+        )
+        print(model_summary)
+        print(self.classifier)
+        print(self.loss_fn)
+
     def _init_model_by_unsloth(
         self,
         model_name: str,
@@ -53,18 +77,20 @@ class Model(nn.Module):
         max_seq_len: int,
         gradient_checkpointing: bool = True,
     ):
-        backbone, _ = FastLanguageModel.from_pretrained(
+        model_with_head, _ = FastLanguageModel.from_pretrained(
             model_name,
             max_seq_length=max_seq_len,
             dtype=None,
             load_in_4bit=True,
         )
 
+        base_model = model_with_head
+
         self.backbone: PeftModel = FastLanguageModel.get_peft_model(
-            backbone,
+            base_model,
             r=lora_r,
             lora_alpha=16,
-            lora_dropout=0.1,
+            lora_dropout=0,
             bias="none",
             use_gradient_checkpointing=gradient_checkpointing,
             random_state=24,
@@ -102,6 +128,7 @@ class Model(nn.Module):
         attention_mask: LongTensor = None,
         labels: LongTensor = None,
     ) -> SequenceClassifierOutput:
+        # take model
         if self.use_unsloth:
             model = self.backbone.model.model
         else:
@@ -111,10 +138,16 @@ class Model(nn.Module):
         outputs: BaseModelOutputWithPast = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            output_hidden_states=self.use_output_hidden_states,
         )
 
+        # pickup last hidden layer
         last_hidden_state = outputs.last_hidden_state
+        if self.use_unsloth:
+            if self.use_output_hidden_states:
+                last_hidden_state = outputs.hidden_states[-1]
 
+        # pickup last hidden feature
         seq_length: LongTensor = attention_mask.sum(dim=1)
         eos_hidden_states: FloatTensor = last_hidden_state[
             torch.arange(
@@ -123,8 +156,11 @@ class Model(nn.Module):
             ),
             seq_length - 1,
         ]
+
+        # make logits
         logits: FloatTensor = self.classifier(eos_hidden_states.to(torch.float32))
 
+        # make loss
         loss = None
         if labels is not None:
             loss: FloatTensor = self.loss_fn(logits, labels)

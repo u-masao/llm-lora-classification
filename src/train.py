@@ -30,6 +30,8 @@ class Args(Tap):
     num_warmup_epochs: int = 1
 
     use_unsloth: bool = False
+    use_output_hidden_states: bool = False
+    model_print_depth: int = 4
 
     template_type: int = 2
 
@@ -79,6 +81,8 @@ class Experiment:
             lora_r=args.lora_r,
             max_seq_len=args.max_seq_len,
             use_unsloth=args.use_unsloth,
+            use_output_hidden_states=args.use_output_hidden_states,
+            model_print_depth=args.model_print_depth,
             gradient_checkpointing=args.gradient_checkpointing,
         ).eval()
         self.model.write_trainable_params()
@@ -201,7 +205,7 @@ class Experiment:
             **{f"valid.{k}": v for k, v in self.evaluate(self.val_dataloader).items()},
         }
 
-        best_epoch, best_val_f1 = None, metrics["valid.f1"]
+        best_epoch, best_val_f1, best_state_dict = None, metrics["valid.f1"], {}
         self.log(metrics)
 
         for epoch in trange(self.args.epochs, dynamic_ncols=True):
