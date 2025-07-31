@@ -1,6 +1,3 @@
-import unsloth  # noqa: I001 F401
-from unsloth import FastLanguageModel  # noqa: I001
-
 import mlflow
 import peft
 import torch
@@ -23,30 +20,24 @@ class Model(nn.Module):
         lora_r: int,
         max_seq_len: int = 128,
         gradient_checkpointing: bool = True,
-        use_unsloth: bool = False,
-        use_output_hidden_states: bool = False,
         model_print_depth: int = 4,
     ):
         super().__init__()
 
-        self.use_unsloth = use_unsloth
-        self.use_output_hidden_states = use_output_hidden_states
+        backbone: PreTrainedModel = AutoModel.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else None,
+        )
 
-        if use_unsloth:
-            self._init_model_by_unsloth(
-                model_name=model_name,
-                lora_r=lora_r,
-                max_seq_len=max_seq_len,
-                gradient_checkpointing=gradient_checkpointing,
-            )
-            model_print_depth += 1
-        else:
-            self._init_model_by_transformers(
-                model_name=model_name,
-                lora_r=lora_r,
-                max_seq_len=max_seq_len,
-                gradient_checkpointing=gradient_checkpointing,
-            )
+        self.backbone: PeftModel = peft.get_peft_model(
+            backbone,
+            LoraConfig(
+                r=lora_r,
+                lora_alpha=16,
+                lora_dropout=0.1,
+                inference_mode=False,
+            ),
+        )
 
         hidden_size: int = self.backbone.config.hidden_size
         self.classifier = nn.Linear(hidden_size, num_labels, bias=False)
@@ -75,82 +66,20 @@ class Model(nn.Module):
             }
         )
 
-    def _init_model_by_unsloth(
-        self,
-        model_name: str,
-        lora_r: int,
-        max_seq_len: int,
-        gradient_checkpointing: bool = True,
-    ):
-        model_with_head, _ = FastLanguageModel.from_pretrained(
-            model_name,
-            max_seq_length=max_seq_len,
-            dtype=None,
-            load_in_4bit=True,
-        )
-
-        base_model = model_with_head
-
-        self.backbone: PeftModel = FastLanguageModel.get_peft_model(
-            base_model,
-            r=lora_r,
-            lora_alpha=16,
-            lora_dropout=0,
-            bias="none",
-            use_gradient_checkpointing=gradient_checkpointing,
-            random_state=24,
-        )
-
-    def _init_model_by_transformers(
-        self,
-        model_name: str,
-        lora_r: int,
-        max_seq_len: int,
-        gradient_checkpointing: bool = True,
-    ):
-        backbone: PreTrainedModel = AutoModel.from_pretrained(
-            model_name,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else None,
-        )
-
-        self.backbone: PeftModel = peft.get_peft_model(
-            backbone,
-            LoraConfig(
-                r=lora_r,
-                lora_alpha=16,
-                lora_dropout=0.1,
-                inference_mode=False,
-            ),
-        )
-
-        if gradient_checkpointing:
-            self.backbone.enable_input_require_grads()
-            self.backbone.gradient_checkpointing_enable()
-
     def forward(
         self,
         input_ids: LongTensor,
         attention_mask: LongTensor = None,
         labels: LongTensor = None,
     ) -> SequenceClassifierOutput:
-        # take model
-        if self.use_unsloth:
-            model = self.backbone.model.model
-        else:
-            model = self.backbone.model
-
         # take peft backbone output
-        outputs: BaseModelOutputWithPast = model(
+        outputs: BaseModelOutputWithPast = self.backbone.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=self.use_output_hidden_states,
         )
 
         # pickup last hidden layer
         last_hidden_state = outputs.last_hidden_state
-        if self.use_unsloth:
-            if self.use_output_hidden_states:
-                last_hidden_state = outputs.hidden_states[-1]
 
         # pickup last hidden feature
         seq_length: LongTensor = attention_mask.sum(dim=1)

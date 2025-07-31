@@ -1,5 +1,3 @@
-import unsloth  # noqa: I001 F401
-
 import time
 from datetime import datetime
 from pathlib import Path
@@ -29,8 +27,6 @@ class Args(Tap):
     epochs: int = 10
     num_warmup_epochs: int = 1
 
-    use_unsloth: bool = False
-    use_output_hidden_states: bool = False
     model_print_depth: int = 4
 
     template_type: int = 2
@@ -80,8 +76,6 @@ class Experiment:
             num_labels=len(args.labels),
             lora_r=args.lora_r,
             max_seq_len=args.max_seq_len,
-            use_unsloth=args.use_unsloth,
-            use_output_hidden_states=args.use_output_hidden_states,
             model_print_depth=args.model_print_depth,
             gradient_checkpointing=args.gradient_checkpointing,
         ).eval()
@@ -147,7 +141,15 @@ class Experiment:
 
         labels = torch.LongTensor([d["label"] for d in data_list])
         text_length = torch.IntTensor([len(t) for t in text])
-        return BatchEncoding({**inputs, "labels": labels, "text_length": text_length})
+        token_length = inputs.attention_mask.sum(dim=1)
+        return BatchEncoding(
+            {
+                **inputs,
+                "labels": labels,
+                "text_length": text_length,
+                "token_length": token_length,
+            }
+        )
 
     def create_loader(
         self,
@@ -198,7 +200,37 @@ class Experiment:
 
         return optimizer, lr_scheduler
 
+    def calc_token_length(self, max_seq_length: int = 32000):
+        result = {}
+        for name, dataloader in zip(
+            ["train", "valid", "test"],
+            [self.train_dataloader, self.val_dataloader, self.test_dataloader],
+        ):
+            min_length = max_seq_length
+            max_length = 0
+            total_length = 0
+
+            for batch in tqdm(
+                dataloader,
+                total=len(dataloader),
+                desc=name,
+            ):
+                token_lengths = batch["token_length"].tolist()
+                min_length = min([min_length] + token_lengths)
+                max_length = max([max_length] + token_lengths)
+                total_length += sum(token_lengths)
+            result = result | {
+                f"{name}.min_token_length": min_length,
+                f"{name}.max_token_length": max_length,
+                f"{name}.total_token_length": total_length,
+                f"{name}.mean_token_length": total_length / len(dataloader.dataset),
+            }
+
+        return result
+
     def run(self):
+        mlflow.log_params(self.calc_token_length())
+
         metrics = {
             "epoch": -1,
             "train.loss": np.inf,
@@ -212,7 +244,7 @@ class Experiment:
             self.model.train()
 
             ts_start = time.perf_counter()
-            total_loss, total_token, total_text_length = 0, 0, 0
+            total_loss, total_token, total_text_length, max_token_length = 0, 0, 0, 0
 
             for batch in tqdm(
                 self.train_dataloader,
@@ -224,8 +256,11 @@ class Experiment:
                 total_text_length += sum(text_length)
                 batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
                 total_token += sum(batch_tokens)
+                max_token_length = max(
+                    [max_token_length] + batch["token_length"].tolist()
+                )
 
-                for query in ["token_type_ids", "text_length"]:
+                for query in ["token_type_ids", "text_length", "token_length"]:
                     if query in batch:
                         batch.pop(query)
 
@@ -258,6 +293,7 @@ class Experiment:
                 "train.text_length": total_text_length,
                 "train.avg_text_length": total_text_length / dataset_length,
                 "train.avg_text_length_par_token": total_text_length / total_token,
+                "train.max_token_length": max_token_length,
                 **{
                     f"valid.{k}": v
                     for k, v in self.evaluate(self.val_dataloader).items()
@@ -291,6 +327,7 @@ class Experiment:
         self.model.eval()
         total_loss, total_token, gold_labels, pred_labels = 0, 0, [], []
         total_text_length = 0
+        max_token_length = 0
 
         ts_start = time.perf_counter()
 
@@ -301,8 +338,9 @@ class Experiment:
             total_text_length += sum(text_length)
             batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
             total_token += sum(batch_tokens)
+            max_token_length = max([max_token_length] + batch["token_length"].tolist())
 
-            for query in ["token_type_ids", "text_length"]:
+            for query in ["token_type_ids", "text_length", "token_length"]:
                 if query in batch:
                     batch.pop(query)
 
@@ -315,8 +353,35 @@ class Experiment:
             gold_labels += batch.labels.tolist()
             total_loss += loss
 
-        elapsed_time = time.perf_counter() - ts_start
+        metrics = {
+            "elapsed_time": time.perf_counter() - ts_start,
+            "dataset_length": len(dataloader.dataset),
+        }
 
+        metrics = metrics | {
+            x: eval(x)
+            for x in [
+                "gold_labels",
+                "pred_labels",
+                "total_loss",
+                "total_token",
+                "total_text_length",
+                "max_token_length",
+            ]
+        }
+        return self.calc_metrics(**metrics)
+
+    def calc_metrics(
+        self,
+        elapsed_time,
+        dataset_length,
+        gold_labels,
+        pred_labels,
+        total_loss,
+        total_token,
+        total_text_length,
+        max_token_length,
+    ):
         accuracy: float = accuracy_score(gold_labels, pred_labels)
         precision, recall, f1, _ = precision_recall_fscore_support(
             gold_labels,
@@ -325,7 +390,6 @@ class Experiment:
             zero_division=0,
             labels=self.args.labels,
         )
-        dataset_length = len(dataloader.dataset)
 
         return {
             "loss": total_loss / dataset_length,
@@ -341,17 +405,14 @@ class Experiment:
             "text_length": total_text_length,
             "avg_text_length": total_text_length / dataset_length,
             "avg_text_length_par_token": total_text_length / total_token,
+            "max_token_length": max_token_length,
         }
 
     def log(self, metrics: dict) -> None:
-        utils.log(metrics, self.args.output_dir / "log.csv")
         tqdm.write(
             f"epoch: {metrics['epoch']}, "
             f"train.loss: {metrics['train.loss']:2.6f}, "
             f"valid.loss: {metrics['valid.loss']:2.6f}, "
-            f"accuracy: {metrics['valid.accuracy']:.4f}, "
-            f"precision: {metrics['valid.precision']:.4f}, "
-            f"recall: {metrics['valid.recall']:.4f}, "
             f"f1: {metrics['valid.f1']:.4f}, "
         )
         mlflow.log_metrics(metrics, step=metrics["epoch"])
