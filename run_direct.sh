@@ -4,6 +4,20 @@ set -x
 
 CUDA_VISIBLE_DEVICES=0
 
+MODELS=(llm-jp/llm-jp-3-150m Qwen/Qwen3-0.6B google/gemma-3-1b-pt)
+# MODELS=(llm-jp/llm-jp-3-150m)
+SEQ_LENGTHS=(5500)
+EPOCHS=10
+
+for MODEL in "${MODELS[@]}"; do
+    for SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
+        CMD="uv run python src/train.py --model_name $MODEL \
+                --max_seq_len $SEQ_LENGTH --epochs $EPOCHS"
+        $CMD
+    done
+done
+
+exit
 
 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10 --use_unsloth --use_output_hidden_states
 uv run python src/train.py --model_name llm-jp/llm-jp-3-150m --max_seq_len 40 --epochs 10 --use_unsloth
