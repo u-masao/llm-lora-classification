@@ -4,16 +4,20 @@ set -x
 
 CUDA_VISIBLE_DEVICES=0
 
+ACCELERATE_CONFIG=accelerate_stage2_config.yaml
+
 MODELS=(llm-jp/llm-jp-3-150m Qwen/Qwen3-0.6B google/gemma-3-1b-pt)
-# MODELS=(llm-jp/llm-jp-3-150m)
-SEQ_LENGTHS=(5500)
-EPOCHS=10
+MODELS=(llm-jp/llm-jp-3-150m)
+SEQ_LENGTHS=(512)
+EPOCHS=2
 
 for MODEL in "${MODELS[@]}"; do
     for SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
-        CMD="uv run python src/train.py --model_name $MODEL \
+        # INTERPRETER="uv run python"
+        INTERPRETER="uv run accelerate launch  --config_file ${ACCELERATE_CONFIG}"
+        CMD="src/train.py --model_name $MODEL \
                 --max_seq_len $SEQ_LENGTH --epochs $EPOCHS"
-        $CMD
+        $INTERPRETER $CMD
     done
 done
 
