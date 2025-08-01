@@ -7,9 +7,8 @@ CUDA_VISIBLE_DEVICES=0
 ACCELERATE_CONFIG=accelerate_stage2_config.yaml
 
 MODELS=(llm-jp/llm-jp-3-150m Qwen/Qwen3-0.6B google/gemma-3-1b-pt)
-MODELS=(llm-jp/llm-jp-3-150m)
-SEQ_LENGTHS=(512)
-EPOCHS=2
+SEQ_LENGTHS=(512 1024 4096)
+EPOCHS=10
 
 for MODEL in "${MODELS[@]}"; do
     for SEQ_LENGTH in "${SEQ_LENGTHS[@]}"; do
