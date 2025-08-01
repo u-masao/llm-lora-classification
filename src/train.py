@@ -79,7 +79,7 @@ class Experiment:
             max_seq_len=args.max_seq_len,
             model_print_depth=args.model_print_depth,
             gradient_checkpointing=args.gradient_checkpointing,
-        ).eval()
+        )
         self.model.write_trainable_params()
 
         self.train_dataloader = self.load_dataset(split="train", shuffle=True)
@@ -111,6 +111,21 @@ class Experiment:
                 "test.docs": len(self.test_dataloader.dataset),
             }
         )
+        self.log_accelerator_config()
+
+    def log_accelerator_config(self):
+        if not self.accelerator.is_main_process:
+            return
+        mlflow.log_params(
+            {
+                "accelerate.distributed_type": str(self.accelerator.distributed_type),
+                "accelerate.num_processes": self.accelerator.num_processes,
+                "accelerate.mixed_precision": self.accelerator.mixed_precision,
+            }
+        )
+        if self.accelerator.deepspeed_config:
+            mlflow.log_dict(self.accelerator.deepspeed_config, "deepspeed_config.json")
+        self.accelerator.wait_for_everyone()
 
     def load_dataset(
         self,
@@ -267,9 +282,12 @@ class Experiment:
             if metrics["valid.f1"] > best_val_f1:
                 best_val_f1 = metrics["valid.f1"]
                 best_epoch = epoch
-                best_state_dict = self.model.clone_state_dict()
+                # best_state_dict = self.model.clone_state_dict()
+                best_state_dict = self.accelerator.unwrap_model(self.model).state_dict()
 
-        self.model.load_state_dict(best_state_dict)
+        # self.model.load_state_dict(best_state_dict)
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        unwrapped_model.load_state_dict(best_state_dict)
         self.model.eval()
 
         val_metrics = {
