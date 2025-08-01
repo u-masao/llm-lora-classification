@@ -90,17 +90,14 @@ class Model(nn.Module):
         attention_mask: LongTensor = None,
         labels: LongTensor = None,
     ) -> SequenceClassifierOutput:
-        # take model
-        model = self.backbone.model
-
         # take peft backbone output
-        outputs: BaseModelOutputWithPast = model(
+        outputs: BaseModelOutputWithPast = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
 
         # pickup last hidden layer
-        last_hidden_state = outputs.last_hidden_state
+        last_hidden_state = outputs.last_hidden_state.clone()
 
         # pickup last hidden feature
         seq_length: LongTensor = attention_mask.sum(dim=1)
@@ -113,7 +110,7 @@ class Model(nn.Module):
         ]
 
         # make logits
-        logits: FloatTensor = self.classifier(eos_hidden_states.to(torch.float32))
+        logits: FloatTensor = self.classifier(eos_hidden_states)
 
         # make loss
         loss = None
@@ -151,5 +148,20 @@ class Model(nn.Module):
         }
 
     def load_state_dict(self, state_dict: dict):
-        peft.set_peft_model_state_dict(self.backbone, state_dict["backbone"])
-        self.classifier.load_state_dict(state_dict["classifier"])
+        # 1. "backbone." で始まるキーを抽出し、プレフィックスを削除して
+        #    バックボーン用の新しいstate_dictを作成
+        backbone_state_dict = {
+            k.replace("backbone.", "", 1): v
+            for k, v in state_dict.items()
+            if k.startswith("backbone.")
+        }
+        peft.set_peft_model_state_dict(self.backbone, backbone_state_dict)
+
+        # 2. "classifier." で始まるキーを抽出し、プレフィックスを削除して
+        #    分類ヘッド用の新しいstate_dictを作成
+        classifier_state_dict = {
+            k.replace("classifier.", "", 1): v
+            for k, v in state_dict.items()
+            if k.startswith("classifier.")
+        }
+        self.classifier.load_state_dict(classifier_state_dict)
