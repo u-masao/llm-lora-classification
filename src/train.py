@@ -1,121 +1,161 @@
+# src/train.py
+
 import time
 from datetime import datetime
 from pathlib import Path
 
 import mlflow
-import numpy as np
 import torch
+import torchinfo
 from accelerate import Accelerator
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from tap import Tap
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
-from transformers import AutoTokenizer, BatchEncoding, PreTrainedModel
+from transformers import AutoTokenizer, BatchEncoding
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.optimization import get_linear_schedule_with_warmup
-from transformers.tokenization_utils import PreTrainedTokenizer
 
 import src.utils as utils
-from src.models import Model
+from src.models import ClassificationModel
 
 
 class Args(Tap):
+    # --- Model & Tokenizer Arguments ---
     model_name: str = "rinna/japanese-gpt-neox-3.6b"
-    dataset_dir: Path = "./datasets/livedoor"
+    max_seq_len: int = 512
 
-    batch_size: int = 32
-    epochs: int = 10
-    num_warmup_epochs: int = 1
+    # --- LoRA Arguments ---
+    lora_r: int = 32
+    lora_alpha: int = 16
+    lora_dropout: float = 0.1
 
-    model_print_depth: int = 4
-    gradient_accumulation_steps: int = 4
-
+    # --- Data Arguments ---
+    dataset_dir: Path = Path("./datasets/livedoor")
     template_type: int = 2
 
+    # --- Training Arguments ---
+    epochs: int = 10
+    batch_size: int = 32
     lr: float = 5e-4
-    lora_r: int = 32
     weight_decay: float = 0.01
-    max_seq_len: int = 512
+    num_warmup_epochs: int = 1
+    gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = True
 
+    # --- Environment Arguments ---
     seed: int = 42
+    num_workers: int = 4
+    model_print_depth: int = 4
 
     def process_args(self):
+        # ラベル情報をロード
         self.label2id: dict[str, int] = utils.load_json(
             self.dataset_dir / "label2id.json"
         )
         self.labels: list[int] = list(self.label2id.values())
 
-        date, time = datetime.now().strftime("%Y-%m-%d/%H-%M-%S.%f").split("/")
-        self.output_dir = self._make_output_dir(
-            "outputs",
-            self.model_name,
-            date,
-            time,
-        )
-
-    def _make_output_dir(self, *args) -> Path:
-        args = [str(a).replace("/", "__") for a in args]
-        output_dir = Path(*args)
-        output_dir.mkdir(parents=True)
-        return output_dir
+        # 出力ディレクトリを生成
+        date, time_str = datetime.now().strftime("%Y-%m-%d/%H-%M-%S.%f").split("/")
+        model_name_safe = self.model_name.replace("/", "__")
+        self.output_dir = Path("outputs", model_name_safe, date, time_str)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
 
-class Experiment:
+class Trainer:
     def __init__(self, args: Args):
-        self.args: Args = args
-
-        use_fast = "japanese-gpt-neox" not in args.model_name
-        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(
-            args.model_name,
-            model_max_length=args.max_seq_len,
-            use_fast=use_fast,
-        )
-
-        self.model: PreTrainedModel = Model(
-            model_name=args.model_name,
-            num_labels=len(args.labels),
-            lora_r=args.lora_r,
-            max_seq_len=args.max_seq_len,
-            model_print_depth=args.model_print_depth,
-            gradient_checkpointing=args.gradient_checkpointing,
-        )
-        self.model.write_trainable_params()
-
-        self.train_dataloader = self.load_dataset(split="train", shuffle=True)
-        steps_per_epoch: int = len(self.train_dataloader)
-
+        self.args = args
         self.accelerator = Accelerator(
             log_with="mlflow",
             gradient_accumulation_steps=args.gradient_accumulation_steps,
         )
+
+        # --- 1. Tokenizer のロード ---
+        use_fast = "japanese-gpt-neox" not in args.model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name, use_fast=use_fast
+        )
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # --- 2. Model の初期化 ---
+        self.model = ClassificationModel(
+            model_name=args.model_name,
+            num_labels=len(args.labels),
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            gradient_checkpointing=args.gradient_checkpointing,
+        )
+        self._log_model_summary()
+
+        # --- 3. Dataloader の準備 ---
+        self.train_dataloader = self._create_dataloader(split="train", shuffle=True)
+        self.val_dataloader = self._create_dataloader(split="val", shuffle=False)
+        self.test_dataloader = self._create_dataloader(split="test", shuffle=False)
+
+        # --- 4. Optimizer & Scheduler の準備 ---
+        steps_per_epoch = len(self.train_dataloader) // args.gradient_accumulation_steps
+        optimizer, lr_scheduler = self._create_optimizer(steps_per_epoch)
+
+        # --- 5. Accelerator の準備 ---
         (
             self.model,
+            self.optimizer,
+            self.lr_scheduler,
             self.train_dataloader,
             self.val_dataloader,
             self.test_dataloader,
-            self.optimizer,
-            self.lr_scheduler,
         ) = self.accelerator.prepare(
             self.model,
+            optimizer,
+            lr_scheduler,
             self.train_dataloader,
-            self.load_dataset(split="val", shuffle=False),
-            self.load_dataset(split="test", shuffle=False),
-            *self.create_optimizer(steps_per_epoch),
+            self.val_dataloader,
+            self.test_dataloader,
         )
+        self._log_initial_metrics()
+
+    def _log_model_summary(self):
+        """torchinfo を使ってモデルのサマリーをログに記録する"""
+        if not self.accelerator.is_main_process:
+            return
+
+        # ダミー入力を作成してサマリーを生成
+        dummy_input = {
+            "input_ids": torch.zeros(1, self.args.max_seq_len, dtype=torch.long),
+            "attention_mask": torch.zeros(1, self.args.max_seq_len, dtype=torch.long),
+        }
+        summary = torchinfo.summary(
+            self.model,
+            input_data=dummy_input,
+            depth=self.args.model_print_depth,
+            col_names=["input_size", "output_size", "num_params", "trainable"],
+            col_width=15,
+            verbose=0,
+        )
+
+        tqdm.write(str(summary))
+        mlflow.log_text(str(summary), "model_summary.txt")
+        mlflow.log_metrics(
+            {
+                "model.total_params": summary.total_params,
+                "model.trainable_params": summary.trainable_params,
+            }
+        )
+
+    def _log_initial_metrics(self):
+        """データセットサイズや Accelerator の設定をログに記録する"""
+        if not self.accelerator.is_main_process:
+            return
 
         mlflow.log_metrics(
             {
-                "train.docs": len(self.train_dataloader.dataset),
-                "valid.docs": len(self.val_dataloader.dataset),
-                "test.docs": len(self.test_dataloader.dataset),
+                "dataset.train_size": len(self.train_dataloader.dataset),
+                "dataset.val_size": len(self.val_dataloader.dataset),
+                "dataset.test_size": len(self.test_dataloader.dataset),
             }
         )
-        self.log_accelerator_config()
-
-    def log_accelerator_config(self):
-        if not self.accelerator.is_main_process:
-            return
         mlflow.log_params(
             {
                 "accelerate.distributed_type": str(self.accelerator.distributed_type),
@@ -127,273 +167,257 @@ class Experiment:
             mlflow.log_dict(self.accelerator.deepspeed_config, "deepspeed_config.json")
         self.accelerator.wait_for_everyone()
 
-    def load_dataset(
-        self,
-        split: str,
-        shuffle: bool = False,
-    ) -> DataLoader:
-        path: Path = self.args.dataset_dir / f"{split}.jsonl"
-        dataset: list[dict] = utils.load_jsonl(path).to_dict(orient="records")
-        return self.create_loader(dataset, shuffle=shuffle)
-
-    def build_input(self, title: str, body: str) -> str:
-        if self.args.template_type == 0:
-            return f"タイトル: {title}\n本文: {body}\nラベル: "
-        elif self.args.template_type == 1:
-            return f"タイトル: {title}\n本文: {body}"
-        elif self.args.template_type == 2:
-            return f"{title}\n{body}"
-
-    def collate_fn(self, data_list: list[dict]) -> BatchEncoding:
-        title = [d["title"] for d in data_list]
-        body = [d["body"] for d in data_list]
-        text = [self.build_input(t, b) for t, b in zip(title, body)]
-        text_length = [len(t) for t in text]
-
-        inputs: BatchEncoding = self.tokenizer(
-            text,
-            truncation=True,
-            padding=True,
-            return_tensors="pt",
-            max_length=self.args.max_seq_len,
+    def _create_dataloader(self, split: str, shuffle: bool) -> DataLoader:
+        dataset = utils.load_jsonl(self.args.dataset_dir / f"{split}.jsonl").to_dict(
+            "records"
         )
-
-        labels = torch.LongTensor([d["label"] for d in data_list])
-        text_length = torch.IntTensor([len(t) for t in text])
-        return BatchEncoding({**inputs, "labels": labels, "text_length": text_length})
-
-    def create_loader(
-        self,
-        dataset,
-        batch_size=None,
-        shuffle=False,
-    ):
         return DataLoader(
             dataset,
-            collate_fn=self.collate_fn,
-            batch_size=batch_size or self.args.batch_size,
+            batch_size=self.args.batch_size,
             shuffle=shuffle,
-            num_workers=4,
+            collate_fn=self._collate_fn,
+            num_workers=self.args.num_workers,
             pin_memory=True,
         )
 
-    def create_optimizer(
-        self,
-        steps_per_epoch: int,
-    ) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR]:
+    def _collate_fn(self, data_list: list[dict]) -> BatchEncoding:
+        """データからプロンプトを構築し、トークナイズしてバッチを作成する"""
+        texts = [self._build_prompt(d["title"], d["body"]) for d in data_list]
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.args.max_seq_len,
+            return_tensors="pt",
+        )
+        inputs["labels"] = torch.LongTensor([d["label"] for d in data_list])
+        return inputs
+
+    def _build_prompt(self, title: str, body: str) -> str:
+        """プロンプトテンプレートに基づいて入力を構築する"""
+        templates = {
+            0: f"タイトル: {title}\n本文: {body}\nラベル: ",
+            1: f"タイトル: {title}\n本文: {body}",
+            2: f"{title}\n{body}",
+        }
+        return templates.get(self.args.template_type, f"{title}\n{body}")
+
+    def _create_optimizer(self, steps_per_epoch: int):
         no_decay = {"bias", "LayerNorm.weight"}
         optimizer_grouped_parameters = [
             {
                 "params": [
-                    param
-                    for name, param in self.model.named_parameters()
-                    if name not in no_decay
+                    p
+                    for n, p in self.model.named_parameters()
+                    if not any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": self.args.weight_decay,
             },
             {
                 "params": [
-                    param
-                    for name, param in self.model.named_parameters()
-                    if name in no_decay
+                    p
+                    for n, p in self.model.named_parameters()
+                    if any(nd in n for nd in no_decay)
                 ],
                 "weight_decay": 0.0,
             },
         ]
-
         optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=self.args.lr)
-
         lr_scheduler = get_linear_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=steps_per_epoch * self.args.num_warmup_epochs,
             num_training_steps=steps_per_epoch * self.args.epochs,
         )
-
         return optimizer, lr_scheduler
 
-    def run(self):
-        metrics = {
-            "epoch": -1,
-            "train.loss": np.inf,
-            **{f"valid.{k}": v for k, v in self.evaluate(self.val_dataloader).items()},
-        }
+    def _prepare_batch_for_model(self, batch: dict) -> dict:
+        """モデルに渡す前に不要なキーを削除する"""
+        # token_type_ids は多くのCausal LMで不要
+        if "token_type_ids" in batch:
+            batch.pop("token_type_ids")
+        return batch
 
-        best_epoch, best_val_f1, best_state_dict = None, metrics["valid.f1"], {}
-        self.log(metrics)
+    def run_training(self):
+        """訓練と評価のメインループを実行する"""
+        best_val_f1, best_epoch = 0.0, -1
+        best_state_dict = None
 
-        for epoch in trange(self.args.epochs, dynamic_ncols=True):
-            self.model.train()
+        # --- 訓練開始前の初期評価 ---
+        initial_metrics = self._evaluate_step("valid", self.val_dataloader)
+        self._log_metrics({"epoch": -1, **initial_metrics})
 
-            ts_start = time.perf_counter()
-            total_loss, total_token, total_text_length = 0, 0, 0
+        # --- 訓練ループ ---
+        for epoch in trange(self.args.epochs, desc="Epochs", dynamic_ncols=True):
+            epoch_start_time = time.perf_counter()
 
-            for batch in tqdm(
-                self.train_dataloader,
-                total=len(self.train_dataloader),
-                dynamic_ncols=True,
-                leave=False,
-            ):
-                with self.accelerator.accumulate(self.model):
-                    text_length = batch["text_length"].tolist()
-                    total_text_length += sum(text_length)
-                    batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
-                    total_token += sum(batch_tokens)
+            # 訓練ステップ
+            train_metrics = self._train_epoch()
+            train_metrics["train.elapsed_time"] = time.perf_counter() - epoch_start_time
 
-                    for query in ["token_type_ids", "text_length"]:
-                        if query in batch:
-                            batch.pop(query)
+            # 評価ステップ
+            val_metrics = self._evaluate_step("valid", self.val_dataloader)
 
-                    self.optimizer.zero_grad()
-                    out: SequenceClassifierOutput = self.model(**batch)
-                    loss: torch.FloatTensor = out.loss
+            # メトリクスの集約とロギング
+            metrics = {"epoch": epoch, **train_metrics, **val_metrics}
+            self._log_metrics(metrics)
 
-                    batch_size: int = batch.input_ids.size(0)
-                    total_loss += loss.item() * batch_size
-
-                    self.accelerator.backward(loss)
-
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-
-            train_elapsed_time = time.perf_counter() - ts_start
-
-            self.model.eval()
-
-            dataset_length = len(self.train_dataloader.dataset)
-
-            metrics = {
-                "epoch": epoch,
-                "train.loss": total_loss / dataset_length,
-                "train.elapsed_time": train_elapsed_time,
-                "train.tokens": total_token,
-                "train.avg_tokens_par_sec": total_token / train_elapsed_time,
-                "train.avg_data_par_sec": dataset_length / train_elapsed_time,
-                "train.avg_tokens_par_doc": total_token / dataset_length,
-                "train.text_length": total_text_length,
-                "train.avg_text_length": total_text_length / dataset_length,
-                "train.avg_text_length_par_token": total_text_length / total_token,
-                **{
-                    f"valid.{k}": v
-                    for k, v in self.evaluate(self.val_dataloader).items()
-                },
-            }
-            self.log(metrics)
-
+            # ベストモデルの保存
             if metrics["valid.f1"] > best_val_f1:
                 best_val_f1 = metrics["valid.f1"]
                 best_epoch = epoch
-                # best_state_dict = self.model.clone_state_dict()
-                best_state_dict = self.accelerator.unwrap_model(self.model).state_dict()
+                # unwrap_model で Accelerator のラッパーを解除してから state_dict を取得
+                best_state_dict = self.accelerator.get_state_dict(
+                    self.accelerator.unwrap_model(self.model)
+                )
+                tqdm.write(
+                    f"🎉 New best model found at epoch {epoch} "
+                    f"with F1: {best_val_f1:.4f}"
+                )
 
-        # self.model.load_state_dict(best_state_dict)
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-        unwrapped_model.load_state_dict(best_state_dict)
-        self.model.eval()
+        # --- 訓練終了後の最終評価 ---
+        tqdm.write(f"Best model from epoch {best_epoch} with F1: {best_val_f1:.4f}")
+        if best_state_dict:
+            # ベストモデルの重みをロード
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            unwrapped_model.load_state_dict(best_state_dict)
 
-        val_metrics = {
-            "best.epoch": best_epoch,
-            **{
-                f"best.valid.{k}": v
-                for k, v in self.evaluate(self.val_dataloader).items()
-            },
-        }
-        test_metrics = {
-            f"best.test.{k}": v for k, v in self.evaluate(self.test_dataloader).items()
-        }
+            # 検証・テストデータで最終評価
+            best_val_metrics = self._evaluate_step("best.valid", self.val_dataloader)
+            best_test_metrics = self._evaluate_step("best.test", self.test_dataloader)
 
-        return val_metrics, test_metrics
+            final_metrics = {
+                "best.epoch": best_epoch,
+                **best_val_metrics,
+                **best_test_metrics,
+            }
+            self._log_metrics(final_metrics)
+            utils.save_json(final_metrics, self.args.output_dir / "final-metrics.json")
+
+            # モデルの保存
+            self.accelerator.save_state(output_dir=self.args.output_dir / "best_model")
+
+    def _train_epoch(self) -> dict:
+        """1エポック分の訓練を実行する"""
+        self.model.train()
+        total_loss = 0
+
+        pbar = tqdm(
+            self.train_dataloader, desc="Training", dynamic_ncols=True, leave=False
+        )
+        for batch in pbar:
+            with self.accelerator.accumulate(self.model):
+                _batch = self._prepare_batch_for_model(batch)
+                outputs: SequenceClassifierOutput = self.model(**_batch)
+                loss = outputs.loss
+
+                # 損失を収集して表示
+                total_loss += loss.detach().float()
+                avg_loss = total_loss / (pbar.n + 1)
+                pbar.set_postfix(loss=f"{avg_loss:.4f}")
+
+                self.accelerator.backward(loss)
+                self.optimizer.step()
+                self.lr_scheduler.step()
+                self.optimizer.zero_grad()
+
+        # エポック全体の平均損失を計算
+        avg_epoch_loss = self.accelerator.gather(total_loss).mean().item() / len(
+            self.train_dataloader
+        )
+        return {"train.loss": avg_epoch_loss}
 
     @torch.inference_mode()
-    def evaluate(self, dataloader: DataLoader) -> dict[str, float]:
+    def _evaluate_step(self, prefix: str, dataloader: DataLoader) -> dict:
+        """指定されたデータローダーで評価を実行し、メトリクスを返す"""
         self.model.eval()
-        total_loss, total_token, gold_labels, pred_labels = 0, 0, [], []
-        total_text_length = 0
-
-        ts_start = time.perf_counter()
+        all_preds, all_labels = [], []
+        total_loss = 0
 
         for batch in tqdm(
-            dataloader, total=len(dataloader), dynamic_ncols=True, leave=False
+            dataloader, desc=f"Evaluating {prefix}", dynamic_ncols=True, leave=False
         ):
-            text_length = batch["text_length"].tolist()
-            total_text_length += sum(text_length)
-            batch_tokens = batch["attention_mask"].sum(dim=1).tolist()
-            total_token += sum(batch_tokens)
+            _batch = self._prepare_batch_for_model(batch)
+            outputs: SequenceClassifierOutput = self.model(**_batch)
 
-            for query in ["token_type_ids", "text_length"]:
-                if query in batch:
-                    batch.pop(query)
+            total_loss += outputs.loss.detach().float()
 
-            out: SequenceClassifierOutput = self.model(**batch)
+            preds = outputs.logits.argmax(dim=-1)
+            labels = _batch["labels"]
 
-            batch_size: int = batch.input_ids.size(0)
-            loss = out.loss.item() * batch_size
+            # Accelerator でプロセス間のテンソルを収集
+            all_preds.append(self.accelerator.gather(preds))
+            all_labels.append(self.accelerator.gather(labels))
 
-            pred_labels += out.logits.argmax(dim=-1).tolist()
-            gold_labels += batch.labels.tolist()
-            total_loss += loss
+        # 収集したテンソルをCPUに移動し、リストに変換
+        all_preds = torch.cat(all_preds).cpu().tolist()
+        all_labels = torch.cat(all_labels).cpu().tolist()
 
-        elapsed_time = time.perf_counter() - ts_start
+        # データセット全体で切り捨てられていないか確認
+        if len(all_preds) > len(dataloader.dataset):
+            all_preds = all_preds[: len(dataloader.dataset)]
+            all_labels = all_labels[: len(dataloader.dataset)]
 
-        accuracy: float = accuracy_score(gold_labels, pred_labels)
+        # メトリクス計算
+        avg_loss = total_loss.mean().item() / len(dataloader)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            gold_labels,
-            pred_labels,
-            average="macro",
-            zero_division=0,
-            labels=self.args.labels,
+            all_labels, all_preds, average="macro", zero_division=0
         )
-        dataset_length = len(dataloader.dataset)
+        accuracy = accuracy_score(all_labels, all_preds)
 
         return {
-            "loss": total_loss / dataset_length,
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "elapsed_time": elapsed_time,
-            "tokens": total_token,
-            "avg_tokens_par_sec": total_token / elapsed_time,
-            "avg_data_par_sec": dataset_length / elapsed_time,
-            "avg_tokens_par_doc": total_token / dataset_length,
-            "text_length": total_text_length,
-            "avg_text_length": total_text_length / dataset_length,
-            "avg_text_length_par_token": total_text_length / total_token,
+            f"{prefix}.loss": avg_loss,
+            f"{prefix}.accuracy": accuracy,
+            f"{prefix}.precision": precision,
+            f"{prefix}.recall": recall,
+            f"{prefix}.f1": f1,
         }
 
-    def log(self, metrics: dict) -> None:
-        utils.log(metrics, self.args.output_dir / "log.csv")
-        tqdm.write(
-            f"epoch: {metrics['epoch']}, "
-            f"train.loss: {metrics['train.loss']:2.6f}, "
-            f"valid.loss: {metrics['valid.loss']:2.6f}, "
-            f"accuracy: {metrics['valid.accuracy']:.4f}, "
-            f"precision: {metrics['valid.precision']:.4f}, "
-            f"recall: {metrics['valid.recall']:.4f}, "
-            f"f1: {metrics['valid.f1']:.4f}, "
-        )
-        mlflow.log_metrics(metrics, step=metrics["epoch"])
+    def _log_metrics(self, metrics: dict):
+        """コンソールと MLflow にメトリクスを記録する"""
+        if not self.accelerator.is_main_process:
+            return
+
+        epoch = metrics.get("epoch", -1)
+        # MLflow にロギング
+        mlflow.log_metrics(metrics, step=epoch if epoch != -1 else None)
+
+        # CSVファイルにロギング
+        # epoch をキーに持つログのみを記録
+        if "epoch" in metrics:
+            utils.log(metrics, self.args.output_dir / "log.csv")
+
+        # コンソールに表示
+        log_str = f"Epoch: {metrics.get('epoch', 'N/A'):>2} |"
+        if "train.loss" in metrics:
+            log_str += f" Train Loss: {metrics['train.loss']:.4f} |"
+        if "valid.f1" in metrics:
+            log_str += f" Valid F1: {metrics['valid.f1']:.4f} |"
+        if "valid.loss" in metrics:
+            log_str += f" Valid Loss: {metrics['valid.loss']:.4f}"
+
+        tqdm.write(log_str)
 
 
 def main(args: Args):
-    # setup log
+    # MLflow のセットアップ
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
     mlflow.set_experiment("train")
     mlflow.system_metrics.enable_system_metrics_logging()
     mlflow.start_run()
     mlflow.log_params(args.as_dict())
 
-    exp = Experiment(args=args)
-    val_metrics, test_metrics = exp.run()
+    # 乱数シードの初期化
+    utils.init(seed=args.seed)
 
-    utils.save_json(val_metrics, args.output_dir / "val-metrics.json")
-    utils.save_json(test_metrics, args.output_dir / "test-metrics.json")
+    # トレーナーの初期化と実行
+    trainer = Trainer(args)
+    trainer.run_training()
+
+    # configの保存
     utils.save_config(args, args.output_dir / "config.json")
-    mlflow.log_metrics(val_metrics)
-    mlflow.log_metrics(test_metrics)
     mlflow.end_run()
 
 
 if __name__ == "__main__":
     cli_args = Args().parse_args()
-    utils.init(seed=cli_args.seed)
     main(cli_args)

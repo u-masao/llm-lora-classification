@@ -1,8 +1,8 @@
-import mlflow
+# src/models.py
+
 import peft
 import torch
 import torch.nn as nn
-import torchinfo
 from peft import LoraConfig, PeftModel
 from torch import FloatTensor, LongTensor
 from transformers import AutoModel, PreTrainedModel
@@ -12,156 +12,86 @@ from transformers.modeling_outputs import (
 )
 
 
-class Model(nn.Module):
+class ClassificationModel(nn.Module):
+    """
+    PEFT (LoRA) を適用した事前学習済みモデルに分類ヘッドを追加したモデル。
+    """
+
     def __init__(
         self,
         model_name: str,
         num_labels: int,
         lora_r: int,
-        max_seq_len: int = 128,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.1,
         gradient_checkpointing: bool = True,
-        model_print_depth: int = 4,
     ):
         super().__init__()
 
-        self._init_model_by_transformers(
-            model_name=model_name,
-            lora_r=lora_r,
-            max_seq_len=max_seq_len,
-            gradient_checkpointing=gradient_checkpointing,
-        )
-
-        hidden_size: int = self.backbone.config.hidden_size
-        self.classifier = nn.Linear(hidden_size, num_labels, bias=False)
-        self.loss_fn = nn.CrossEntropyLoss()
-
-        # print model summary
-        batch_size = 1
-        model_summary = torchinfo.summary(
-            self.backbone,
-            depth=model_print_depth,
-            input_size=[
-                (batch_size, max_seq_len),
-                (batch_size, max_seq_len),
-                (batch_size, max_seq_len),
-            ],
-            dtypes=[torch.long, torch.long, torch.long],
-            col_names=["input_size", "output_size", "num_params", "trainable"],
-            col_width=15,
-            verbose=0,
-        )
-        mlflow.log_text(str(model_summary), "model_summary.txt")
-        mlflow.log_metrics(
-            {
-                "model.total_params": model_summary.total_params,
-                "model.trainable_params": model_summary.trainable_params,
-            }
-        )
-
-    def _init_model_by_transformers(
-        self,
-        model_name: str,
-        lora_r: int,
-        max_seq_len: int,
-        gradient_checkpointing: bool = True,
-    ):
+        # 1. バックボーンとなる事前学習済みモデルをロード
         backbone: PreTrainedModel = AutoModel.from_pretrained(
             model_name,
+            # BF16が利用可能なら自動的に使用
             torch_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else None,
         )
 
-        self.backbone: PeftModel = peft.get_peft_model(
-            backbone,
-            LoraConfig(
-                r=lora_r,
-                lora_alpha=16,
-                lora_dropout=0.1,
-                inference_mode=False,
-            ),
+        # 2. LoRA (PEFT) の設定を適用
+        peft_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            inference_mode=False,
+            # モデルによっては target_modules の指定が必要な場合がある
+            # target_modules=["query_key_value"],
         )
+        self.backbone: PeftModel = peft.get_peft_model(backbone, peft_config)
 
         if gradient_checkpointing:
             self.backbone.enable_input_require_grads()
             self.backbone.gradient_checkpointing_enable()
 
+        # 3. 分類ヘッドと損失関数を定義
+        hidden_size: int = self.backbone.config.hidden_size
+        self.classifier = nn.Linear(hidden_size, num_labels, bias=False)
+        self.loss_fn = nn.CrossEntropyLoss()
+
     def forward(
         self,
         input_ids: LongTensor,
-        attention_mask: LongTensor = None,
+        attention_mask: LongTensor,
         labels: LongTensor = None,
     ) -> SequenceClassifierOutput:
-        # take peft backbone output
+        """
+        フォワードパス。
+        最終層の隠れ状態のうち、各系列の最後のトークンに対応するベクトルを用いて分類を行う。
+        """
+        # バックボーンモデルから隠れ状態を取得
         outputs: BaseModelOutputWithPast = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+        last_hidden_state = outputs.last_hidden_state
 
-        # pickup last hidden layer
-        last_hidden_state = outputs.last_hidden_state.clone()
-
-        # pickup last hidden feature
-        seq_length: LongTensor = attention_mask.sum(dim=1)
-        eos_hidden_states: FloatTensor = last_hidden_state[
-            torch.arange(
-                seq_length.size(0),
-                device=last_hidden_state.device,
-            ),
-            seq_length - 1,
+        # 各系列の最後のトークン（パディングを除く）の隠れ状態を抽出
+        seq_lengths = attention_mask.sum(dim=1)
+        eos_hidden_states = last_hidden_state[
+            torch.arange(last_hidden_state.size(0), device=last_hidden_state.device),
+            seq_lengths - 1,
         ]
 
-        # make logits
-        logits: FloatTensor = self.classifier(eos_hidden_states)
+        # 分類ヘッドを通してロジットを計算
+        logits: FloatTensor = self.classifier(
+            eos_hidden_states.to(self.classifier.weight.dtype)
+        )
 
-        # make loss
+        # ラベルが与えられていれば損失を計算
         loss = None
         if labels is not None:
-            loss: FloatTensor = self.loss_fn(logits, labels)
+            loss = self.loss_fn(logits, labels.view(-1))
 
         return SequenceClassifierOutput(
             loss=loss,
             logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
-
-    def write_trainable_params(self) -> None:
-        trainable_params = 0
-        all_param = 0
-        for _, param in self.named_parameters():
-            num_params = param.numel()
-            all_param += num_params
-            if param.requires_grad:
-                trainable_params += num_params
-
-        percentage = 100 * trainable_params / all_param
-        all_param /= 1000000000
-        trainable_params /= 1_000_000
-
-        print(
-            f"trainable params: {trainable_params:.2f}M || "
-            f"all params: {all_param:.2f}B || "
-            f"trainable%: {percentage:.4f}"
-        )
-
-    def clone_state_dict(self) -> dict:
-        return {
-            "backbone": peft.get_peft_model_state_dict(self.backbone),
-            "classifier": self.classifier.state_dict(),
-        }
-
-    def load_state_dict(self, state_dict: dict):
-        # 1. "backbone." で始まるキーを抽出し、プレフィックスを削除して
-        #    バックボーン用の新しいstate_dictを作成
-        backbone_state_dict = {
-            k.replace("backbone.", "", 1): v
-            for k, v in state_dict.items()
-            if k.startswith("backbone.")
-        }
-        peft.set_peft_model_state_dict(self.backbone, backbone_state_dict)
-
-        # 2. "classifier." で始まるキーを抽出し、プレフィックスを削除して
-        #    分類ヘッド用の新しいstate_dictを作成
-        classifier_state_dict = {
-            k.replace("classifier.", "", 1): v
-            for k, v in state_dict.items()
-            if k.startswith("classifier.")
-        }
-        self.classifier.load_state_dict(classifier_state_dict)
